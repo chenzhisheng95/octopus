@@ -48,6 +48,7 @@ function EditDialogContent({ group, displayMembers, isSubmitting, onSubmit }: Ed
                     initial={{
                         name: group.name,
                         retry_interval: group.retry_interval,
+                        timeout: group.timeout,
                         members: displayMembers,
                     }}
                     submitText={t('detail.actions.save')}
@@ -178,6 +179,7 @@ export function GroupCard({ group }: { group: Group }) {
 
         if (nextName && nextName !== group.name) payload.name = nextName;
         if (values.retry_interval !== group.retry_interval) payload.retry_interval = values.retry_interval;
+        if (values.timeout !== group.timeout) payload.timeout = values.timeout;
         if (items_to_add.length) payload.items_to_add = items_to_add;
         if (items_to_update.length) payload.items_to_update = items_to_update;
         if (items_to_delete.length) payload.items_to_delete = items_to_delete;
@@ -194,7 +196,7 @@ export function GroupCard({ group }: { group: Group }) {
             },
             onError,
         });
-    }, [group.id, group.items, group.name, group.retry_interval, onSuccess, onError, updateGroup]);
+    }, [group.id, group.items, group.name, group.retry_interval, group.timeout, onSuccess, onError, updateGroup]);
 
     return (
     <article className="flex flex-col rounded-3xl border border-border bg-card text-card-foreground p-4">

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,9 @@ import (
 
 var requestIDs atomic.Uint64 // requestIDs 分配进程内严格递增的请求 ID。
 var errNoActiveChannel = errors.New("no active channel") // errNoActiveChannel 表示分组尚未选择活动渠道。
+var errUpstreamTimeout = errors.New("upstream request timed out") // errUpstreamTimeout 表示单次上游尝试超时。
+
+const defaultGroupTimeout = 30 // defaultGroupTimeout 是分组未显式配置超时时的默认秒数。
 
 // execution 保存单个客户端请求的全部可变执行状态。
 type execution struct {
@@ -92,8 +96,8 @@ func (e *execution) execute() {
 		}
 
 		activeItemChanged := op.GroupActiveItemChangeSignal()
-		item, channel, retryInterval, retryErr := e.resolveTarget(ctx)
-		if errors.Is(retryErr, errNoActiveChannel) {
+		candidates, retryInterval, timeout, resolveErr := e.resolveCandidates(ctx)
+		if errors.Is(resolveErr, errNoActiveChannel) {
 			if e.log.Error != "" {
 				e.log.Error = ""
 				e.emit(LogEventTargetWaiting, nil)
@@ -106,19 +110,30 @@ func (e *execution) execute() {
 			}
 			continue
 		}
-		if retryErr != nil {
-			e.recordUnavailableTarget(item, channel, retryErr)
-		} else {
-			done, attemptErr := e.executeAttempt(ctx, item, channel)
+		if resolveErr != nil {
+			e.recordUnavailableTarget(model.GroupItem{}, nil, resolveErr)
+			select {
+			case <-ctx.Done():
+				e.finish(RequestStateCanceled, ctx.Err(), nil, nil)
+				return
+			case <-time.After(time.Duration(retryInterval) * time.Second):
+			}
+			continue
+		}
+
+		// 按优先级依次尝试组内渠道，任一渠道失败或超时立即切到下一个来源。
+		for _, candidate := range candidates {
+			if err := ctx.Err(); err != nil {
+				e.finish(RequestStateCanceled, err, nil, nil)
+				return
+			}
+			done, _ := e.executeAttempt(ctx, candidate.item, candidate.channel, time.Duration(timeout)*time.Second)
 			if done {
 				return
 			}
-			retryErr = attemptErr
 		}
 
-		if retryErr == nil {
-			continue
-		}
+		// 本轮所有来源均失败，等待后从头重试，活动渠道恢复后自动切回。
 		select {
 		case <-ctx.Done():
 			e.finish(RequestStateCanceled, ctx.Err(), nil, nil)
@@ -128,45 +143,65 @@ func (e *execution) execute() {
 	}
 }
 
-// resolveTarget 加载请求模型对应的分组并校验当前活动渠道，返回本轮分组项、渠道和重试间隔。
-func (e *execution) resolveTarget(ctx context.Context) (model.GroupItem, *model.Channel, int, error) {
+// candidate 保存组内一个可尝试的渠道及其分组项。
+type candidate struct {
+	item    model.GroupItem // 分组项。
+	channel *model.Channel  // 对应的渠道配置。
+}
+
+// resolveCandidates 返回按优先级排序的可用渠道列表：活动项优先，其余按 Priority 升序。
+func (e *execution) resolveCandidates(ctx context.Context) ([]candidate, int, int, error) {
 	retryInterval := 1
+	timeout := defaultGroupTimeout
 	group, err := op.GroupGetByName(e.request.model, ctx)
 	if err != nil {
-		return model.GroupItem{}, nil, retryInterval, errors.New("model not found")
+		return nil, retryInterval, timeout, errors.New("model not found")
 	}
 	if group.RetryInterval >= 1 {
 		retryInterval = group.RetryInterval
 	}
-
-	var item model.GroupItem
-	if group.ActiveItemID == 0 {
-		return model.GroupItem{}, nil, retryInterval, errNoActiveChannel
+	if group.Timeout >= 1 {
+		timeout = group.Timeout
 	}
-	for _, candidate := range group.Items {
-		if candidate.ID == group.ActiveItemID {
-			item = candidate
-			break
+	if group.ActiveItemID == 0 {
+		return nil, retryInterval, timeout, errNoActiveChannel
+	}
+
+	var active model.GroupItem
+	rest := make([]model.GroupItem, 0, len(group.Items))
+	for _, item := range group.Items {
+		if item.ID == group.ActiveItemID {
+			active = item
+		} else {
+			rest = append(rest, item)
 		}
 	}
-	if item.ID == 0 {
-		return model.GroupItem{}, nil, retryInterval, errors.New("active channel not found")
+	if active.ID == 0 {
+		return nil, retryInterval, timeout, errors.New("active channel not found")
 	}
-	channel, err := op.ChannelGet(item.ChannelID, ctx)
-	if err != nil {
-		return item, nil, retryInterval, errors.New("active channel not found")
+	sort.Slice(rest, func(i, j int) bool { return rest[i].Priority < rest[j].Priority })
+
+	candidates := make([]candidate, 0, len(group.Items))
+	appendCandidate := func(item model.GroupItem) {
+		channel, err := op.ChannelGet(item.ChannelID, ctx)
+		if err != nil || !channel.Enabled || channel.Key == "" {
+			return
+		}
+		candidates = append(candidates, candidate{item: item, channel: channel})
 	}
-	if !channel.Enabled {
-		return item, channel, retryInterval, errors.New("active channel disabled")
+	appendCandidate(active)
+	for _, item := range rest {
+		appendCandidate(item)
 	}
-	if channel.Key == "" {
-		return item, channel, retryInterval, errors.New("active channel has no available key")
+	if len(candidates) == 0 {
+		return nil, retryInterval, timeout, errors.New("no available channel")
 	}
-	return item, channel, retryInterval, nil
+	return candidates, retryInterval, timeout, nil
 }
 
 // executeAttempt 执行当前渠道的一次上游尝试，提交前失败时交回外层继续重试。
-func (e *execution) executeAttempt(ctx context.Context, item model.GroupItem, channel *model.Channel) (bool, error) {
+// timeout 限定单次上游尝试（流式请求为取回首个事件前）的时长，超时会中止并返回 errUpstreamTimeout。
+func (e *execution) executeAttempt(ctx context.Context, item model.GroupItem, channel *model.Channel, timeout time.Duration) (bool, error) {
 	client, err := helper.ChannelHttpClient(channel)
 	if err != nil {
 		e.recordUnavailableTarget(item, channel, err)
@@ -176,7 +211,44 @@ func (e *execution) executeAttempt(ctx context.Context, item model.GroupItem, ch
 	defer cancelAttempt()
 	startedAt := time.Now()
 	attempt := e.startAttempt(item, channel, cancelAttempt)
-	result := (&forwarder{protocol: e.protocol, request: &e.request, client: client}).executeUpstream(attemptCtx, item.ModelName, channel)
+
+	type attemptOutcome struct {
+		result upstreamResult
+	}
+	done := make(chan attemptOutcome, 1)
+	go func() {
+		done <- attemptOutcome{(&forwarder{protocol: e.protocol, request: &e.request, client: client}).executeUpstream(attemptCtx, item.ModelName, channel)}
+	}()
+
+	var result upstreamResult
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		select {
+		case <-attemptCtx.Done():
+			cancelAttempt()
+			result = upstreamResult{err: attemptCtx.Err()}
+			if outcome := <-done; outcome.result.response != nil {
+				outcome.result.response.Close()
+			}
+		case <-timer.C:
+			cancelAttempt()
+			result = upstreamResult{err: errUpstreamTimeout}
+			if outcome := <-done; outcome.result.response != nil {
+				outcome.result.response.Close()
+			}
+		case outcome := <-done:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			result = outcome.result
+		}
+	} else {
+		result = (<-done).result
+	}
+
 	interrupted := !clearAttempt(e.log.ID, attempt.Index)
 	if interrupted {
 		result.err = errors.New("relay attempt interrupted")

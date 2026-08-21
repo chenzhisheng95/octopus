@@ -16,6 +16,7 @@ import { matchesGroupName, memberKey, normalizeKey } from './utils';
 export type GroupEditorValues = {
     name: string;
     retry_interval: number;
+    timeout: number;
     members: SelectedMember[];
 };
 
@@ -238,6 +239,7 @@ export function GroupEditor({
 
     const [groupName, setGroupName] = useState(initial?.name ?? '');
     const [retryInterval, setRetryInterval] = useState(initial?.retry_interval ?? 1);
+    const [timeout, setTimeoutValue] = useState(initial?.timeout ?? 30);
     const [selectedMembers, setSelectedMembers] = useState<SelectedMember[]>(initial?.members ?? []);
     const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
 
@@ -294,6 +296,7 @@ export function GroupEditor({
         onSubmit({
             name: groupName,
             retry_interval: retryInterval,
+            timeout,
             members: selectedMembers,
         });
     };
@@ -303,7 +306,7 @@ export function GroupEditor({
         <form onSubmit={handleSubmit} className="flex flex-col h-full min-h-0 ">
             <div className="flex-1 min-h-0 overflow-hidden px-1">
                 <FieldGroup className="gap-4 flex flex-col min-h-0 h-full">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <Field>
                             <FieldLabel htmlFor="group-name">{t('form.name')}</FieldLabel>
                             <Input
@@ -325,6 +328,22 @@ export function GroupEditor({
                                 onChange={(e) => {
                                     const value = Number.parseInt(e.target.value, 10);
                                     setRetryInterval(Number.isFinite(value) && value >= 1 ? value : 1);
+                                }}
+                                className="rounded-xl"
+                            />
+                        </Field>
+                        <Field>
+                            <FieldLabel htmlFor="group-timeout">{t('form.timeout')}</FieldLabel>
+                            <Input
+                                id="group-timeout"
+                                type="number"
+                                inputMode="numeric"
+                                min={1}
+                                step={1}
+                                value={String(timeout)}
+                                onChange={(e) => {
+                                    const value = Number.parseInt(e.target.value, 10);
+                                    setTimeoutValue(Number.isFinite(value) && value >= 1 ? value : 1);
                                 }}
                                 className="rounded-xl"
                             />

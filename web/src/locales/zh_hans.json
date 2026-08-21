@@ -332,6 +332,7 @@
         "form": {
             "name": "分组名称",
             "retryInterval": "重试间隔",
+            "timeout": "超时（秒）",
             "items": "已选模型",
             "addItem": "添加模型",
             "autoAdd": "自动添加",

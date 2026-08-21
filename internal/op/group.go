@@ -58,6 +58,9 @@ func GroupCreate(group *model.Group, ctx context.Context) error {
 	if group.RetryInterval < 1 {
 		group.RetryInterval = 1
 	}
+	if group.Timeout < 1 {
+		group.Timeout = 30
+	}
 	if err := db.GetDB().WithContext(ctx).Create(group).Error; err != nil {
 		return err
 	}
@@ -91,6 +94,10 @@ func GroupUpdate(req *model.GroupUpdateRequest, ctx context.Context) (*model.Gro
 	if req.RetryInterval != nil {
 		selectFields = append(selectFields, "retry_interval")
 		updates.RetryInterval = *req.RetryInterval
+	}
+	if req.Timeout != nil {
+		selectFields = append(selectFields, "timeout")
+		updates.Timeout = *req.Timeout
 	}
 
 	if len(selectFields) > 0 {

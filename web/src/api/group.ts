@@ -17,6 +17,7 @@ export interface Group {
     name: string;
     active_item_id: number;
     retry_interval: number;
+    timeout: number;
     items?: GroupItem[];
 }
 
@@ -38,6 +39,7 @@ export interface GroupUpdateRequest {
     id: number;
     name?: string;
     retry_interval?: number;
+    timeout?: number;
     items_to_add?: GroupItemAddRequest[];
     items_to_update?: GroupItemUpdateRequest[];
     items_to_delete?: number[];
