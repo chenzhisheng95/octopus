@@ -2,6 +2,9 @@
 
 # 前端构建阶段：构建 Web 管理界面到 static/out
 FROM node:24-alpine AS web-builder
+ARG APP_VERSION=local
+ENV VITE_APP_VERSION=${APP_VERSION} \
+    VITE_GITHUB_REPO=https://github.com/chenzhisheng95/octopus
 WORKDIR /web
 RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -11,12 +14,13 @@ RUN pnpm build
 
 # 后端编译阶段：编译含前端资源的 octopus 二进制
 FROM golang:1.26 AS builder
+ARG APP_VERSION=local
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web-builder /static/out ./static/out
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -tags=jsoniter -o /out/octopus .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/bestruirui/octopus/internal/conf.Version=${APP_VERSION}" -tags=jsoniter -o /out/octopus .
 
 # 运行阶段：轻量 alpine
 FROM alpine:3.20

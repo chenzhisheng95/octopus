@@ -31,7 +31,8 @@ func init() {
 func latest(c *gin.Context) {
 	latestInfo, err := update.GetLatestInfo()
 	if err != nil {
-		resp.Error(c, http.StatusInternalServerError, err.Error())
+		// 本地/自建部署可能没有发布 release，返回空信息避免前端持续报错。
+		resp.Success(c, update.LatestInfo{})
 		return
 	}
 	resp.Success(c, *latestInfo)
